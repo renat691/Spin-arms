@@ -1,5 +1,7 @@
 --[[
-    Spin Arm v3 — максимально широкая диагностика + авто-подхват
+    Spin Arm — FIXED
+    Пишем Transform в PreSimulation (ПОСЛЕ Animator)
+    Работает на R6 и R15
 ]]
 
 local Players = game:GetService("Players")
@@ -10,208 +12,136 @@ local LP = Players.LocalPlayer
 print("[SpinArm] === Старт ===")
 
 local enabled = true
-local SPEED   = 5
-local AXIS    = "X"
-local TOGGLE  = Enum.KeyCode.R
-
+local SPIN_MODE = true
+local SPEED = 3
+local AXIS = "X"
+local HOLD_ANGLE = 0
 local angle = 0
-local target = nil          -- Motor6D | Bone | Weld | Motor
-local targetType = nil      -- "Motor6D" / "Bone" / "Weld" / "Motor"
-local origC0, origTransform, origC1
+local TOGGLE_KEY = Enum.KeyCode.R
 
--- ================= ПОЛНЫЙ ДАМП ПЕРСОНАЖА =================
-local function fullDump(c)
-    print("[Dump] === Полный дамп персонажа: " .. c.Name .. " ===")
-    local counts = {}
-    for _, o in ipairs(c:GetDescendants()) do
-        counts[o.ClassName] = (counts[o.ClassName] or 0) + 1
-    end
-    print("[Dump] Классы объектов:")
-    for cls, n in pairs(counts) do
-        print(string.format("   %-25s x%d", cls, n))
-    end
+local node, nodeType, origC0, origTransform, rigType = nil, nil, nil, nil, "?"
 
-    print("[Dump] --- Motor6D ---")
-    local anyMotor = false
-    for _, o in ipairs(c:GetDescendants()) do
-        if o:IsA("Motor6D") then
-            anyMotor = true
-            print(string.format("   M6D: %-20s P0=%-18s P1=%s",
-                o.Name,
-                o.Part0 and o.Part0.Name or "nil",
-                o.Part1 and o.Part1.Name or "nil"))
-        end
-    end
-    if not anyMotor then print("   (нет)") end
-
-    print("[Dump] --- Bones (первые 30) ---")
-    local bn = 0
-    for _, o in ipairs(c:GetDescendants()) do
-        if o:IsA("Bone") then
-            bn += 1
-            if bn <= 30 then
-                print(string.format("   Bone: %-25s Parent=%s",
-                    o.Name, o.Parent and o.Parent.Name or "nil"))
-            end
-        end
-    end
-    if bn == 0 then print("   (нет)") else print("   ... всего:", bn) end
-
-    print("[Dump] --- Weld / WeldConstraint ---")
-    for _, o in ipairs(c:GetDescendants()) do
-        if o:IsA("Weld") or o:IsA("WeldConstraint") then
-            print(string.format("   %s: %-18s P0=%-18s P1=%s", o.ClassName,
-                o.Name,
-                o.Part0 and o.Part0.Name or "-",
-                o.Part1 and o.Part1.Name or "-"))
-        end
-    end
-
-    print("[Dump] --- Части (Part/MeshPart) с 'arm' в имени ---")
-    for _, o in ipairs(c:GetDescendants()) do
-        if (o:IsA("BasePart")) then
-            local n = o.Name:lower()
-            if n:find("arm") or n:find("hand") or n:find("shoulder") then
-                print(string.format("   %s: %s", o.ClassName, o.Name))
-            end
-        end
-    end
-
-    print("[Dump] === Конец дампа ===")
-end
-
--- ================= ПОИСК ЦЕЛИ =================
-local function findTarget()
-    local c = LP.Character
-    if not c then return nil, nil end
-
-    -- 1) Motor6D Right Shoulder (R6 + R15)
-    for _, o in ipairs(c:GetDescendants()) do
-        if o:IsA("Motor6D") then
-            local n = o.Name:gsub("[%s_%-]", ""):lower()
-            if n == "rightshoulder" then return o, "Motor6D" end
-        end
-    end
-    for _, o in ipairs(c:GetDescendants()) do
-        if o:IsA("Motor6D") and o.Part1 then
-            local n = o.Part1.Name:gsub("[%s_%-]", ""):lower()
-            if n == "rightarm" or n == "rightupperarm" then return o, "Motor6D" end
-        end
-    end
-
-    -- 2) Bone с именем про правую руку
-    for _, o in ipairs(c:GetDescendants()) do
-        if o:IsA("Bone") then
-            local n = o.Name:lower()
-            if n:find("right") and (n:find("shoulder") or n:find("upperarm") or n:find("arm")) then
-                return o, "Bone"
-            end
-        end
-    end
-
-    -- 3) Weld/WeldConstraint на правую руку
-    for _, o in ipairs(c:GetDescendants()) do
-        if o:IsA("Weld") then
-            local p1 = o.Part1 and o.Part1.Name:lower() or ""
-            if p1:find("right") and p1:find("arm") then return o, "Weld" end
-        end
-    end
-
-    -- 4) Motor (legacy)
-    for _, o in ipairs(c:GetDescendants()) do
-        if o:IsA("Motor") then
-            if o.Name:lower():find("right") and o.Name:lower():find("shoulder") then
-                return o, "Motor"
-            end
-        end
-    end
-
-    return nil, nil
-end
-
--- ================= ПРИВЯЗКА =================
-local function bind()
+-- ===== Поиск =====
+local function findNode()
     local c = LP.Character
     if not c then return end
-
-    target, targetType = findTarget()
-    if not target then
-        warn("[SpinArm] ❌ Не нашёл ни мотор, ни bone, ни weld правой руки")
-        fullDump(c)
-        return
+    local hum = c:FindFirstChildOfClass("Humanoid")
+    if hum then
+        rigType = (hum.RigType == Enum.HumanoidRigType.R15) and "R15" or "R6"
     end
 
-    if targetType == "Motor6D" or targetType == "Motor" then
-        origC0 = target.C0
-        origTransform = target.Transform
-        print("[SpinArm] ✅ Привязался к " .. targetType .. ": " .. target:GetFullName())
-    elseif targetType == "Bone" then
-        origTransform = target.Transform
-        print("[SpinArm] ✅ Привязался к Bone: " .. target:GetFullName())
-    elseif targetType == "Weld" then
-        origC0 = target.C0
-        print("[SpinArm] ✅ Привязался к Weld: " .. target:GetFullName())
+    local rua = c:FindFirstChild("RightUpperArm")
+    if rua then
+        local t = rua:FindFirstChild("RightShoulder")
+        if t and t:IsA("AnimationConstraint") then
+            node, nodeType = t, "AC"
+            print("[SpinArm] ✅ AC (R15 новый)")
+            return
+        end
+        if t and t:IsA("Motor6D") then
+            node, nodeType = t, "Motor6D"
+            origC0, origTransform = t.C0, t.Transform
+            print("[SpinArm] ✅ Motor6D (R15)")
+            return
+        end
     end
+
+    local torso = c:FindFirstChild("Torso")
+    if torso then
+        local m = torso:FindFirstChild("Right Shoulder")
+        if m and m:IsA("Motor6D") then
+            node, nodeType = m, "Motor6D"
+            origC0, origTransform = m.C0, m.Transform
+            print("[SpinArm] ✅ Motor6D (R6)")
+            return
+        end
+    end
+
+    for _, o in ipairs(c:GetDescendants()) do
+        if o:IsA("AnimationConstraint") and o.Name:gsub("[%s_%-]",""):lower() == "rightshoulder" then
+            node, nodeType = o, "AC"
+            print("[SpinArm] ✅ AC (fallback)")
+            return
+        end
+    end
+    for _, o in ipairs(c:GetDescendants()) do
+        if o:IsA("Motor6D") and o.Name:gsub("[%s_%-]",""):lower() == "rightshoulder" then
+            node, nodeType = o, "Motor6D"
+            origC0, origTransform = o.C0, o.Transform
+            print("[SpinArm] ✅ Motor6D (fallback)")
+            return
+        end
+    end
+    warn("[SpinArm] ❌ Не найден узел")
 end
 
--- Авто-привязка в цикле
 task.spawn(function()
     while true do
-        if LP.Character and (not target or not target.Parent) then
-            pcall(bind)
+        if LP.Character and (not node or not node.Parent) then
+            node, nodeType, origC0, origTransform = nil, nil, nil, nil
+            pcall(findNode)
         end
         task.wait(1)
     end
 end)
 
 LP.CharacterAdded:Connect(function()
-    target, targetType, origC0, origTransform = nil, nil, nil, nil
+    node, nodeType, origC0, origTransform = nil, nil, nil, nil
     task.wait(1)
-    pcall(bind)
+    pcall(findNode)
 end)
 
--- ================= ВРАЩЕНИЕ =================
-RunService.RenderStepped:Connect(function(dt)
-    if not target or not target.Parent then return end
+-- ===== Вращение =====
+local function getRotCF(deg)
+    local r = math.rad(deg)
+    if AXIS == "X" then return CFrame.Angles(r, 0, 0)
+    elseif AXIS == "Y" then return CFrame.Angles(0, r, 0)
+    else return CFrame.Angles(0, 0, r) end
+end
 
-    -- Выключено — вернуть исходное
-    if not enabled then
-        pcall(function()
-            if targetType == "Motor6D" and origC0 then
-                target.C0 = origC0
-                if origTransform then target.Transform = origTransform end
-            elseif targetType == "Bone" and origTransform then
-                target.Transform = origTransform
-            elseif targetType == "Weld" and origC0 then
-                target.C0 = origC0
-            elseif targetType == "Motor" and origC0 then
-                target.C0 = origC0
-            end
-        end)
-        return
-    end
-
-    angle += dt * SPEED * math.pi * 2
-    local r
-    if AXIS == "X" then r = CFrame.Angles(angle, 0, 0)
-    elseif AXIS == "Y" then r = CFrame.Angles(0, angle, 0)
-    else r = CFrame.Angles(0, 0, angle) end
-
-    pcall(function()
-        if targetType == "Motor6D" then
-            target.C0 = r * origC0
-            target.Transform = CFrame.new()  -- глушим анимацию R15
-        elseif targetType == "Bone" then
-            target.Transform = r * (origTransform or CFrame.new())
-        elseif targetType == "Weld" then
-            target.C0 = r * origC0
-        elseif targetType == "Motor" then
-            target.C0 = r * origC0
+local function apply(deg)
+    if not node or not node.Parent then return end
+    local rot = getRotCF(deg)
+    if nodeType == "AC" then
+        pcall(function() node.Transform = rot end)
+    elseif nodeType == "Motor6D" then
+        if origC0 then
+            pcall(function()
+                node.C0 = rot * origC0
+                node.Transform = CFrame.new()
+            end)
         end
-    end)
+    end
+end
+
+local function reset()
+    if not node then return end
+    if nodeType == "AC" then
+        pcall(function() node.Transform = CFrame.new() end)
+    elseif nodeType == "Motor6D" then
+        pcall(function()
+            if origC0 then node.C0 = origC0 end
+            if origTransform then node.Transform = origTransform end
+        end)
+    end
+end
+
+-- ⚠️ ГЛАВНОЕ ИСПРАВЛЕНИЕ: PreSimulation вместо BindToRenderStep
+RunService.PreSimulation:Connect(function(dt)
+    if not node or not node.Parent then return end
+    if not enabled then return end
+
+    local deg
+    if SPIN_MODE then
+        angle = (angle + dt * SPEED * 360) % 360
+        deg = angle
+    else
+        deg = HOLD_ANGLE
+    end
+    apply(deg)
 end)
 
--- ================= GUI =================
+-- ===== GUI =====
 local function getGuiParent()
     if type(gethui) == "function" then
         local ok, hui = pcall(gethui)
@@ -230,9 +160,7 @@ local sg = Instance.new("ScreenGui")
 sg.Name = "SpinArmGui"
 sg.ResetOnSpawn = false
 sg.IgnoreGuiInset = true
-sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 sg.DisplayOrder = 999999
-
 if syn and syn.protect_gui then pcall(function() syn.protect_gui(sg) end) end
 
 local okP = pcall(function() sg.Parent = getGuiParent() end)
@@ -240,12 +168,11 @@ if not okP or not sg.Parent then
     local pg = LP:FindFirstChildOfClass("PlayerGui") or LP:WaitForChild("PlayerGui", 10)
     if pg then sg.Parent = pg end
 end
-if not sg.Parent then warn("[SpinArm] GUI не создан"); return end
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 220, 0, 200)
-frame.Position = UDim2.new(0, 20, 0.5, -100)
-frame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+frame.Size = UDim2.new(0, 240, 0, 470)
+frame.Position = UDim2.new(0, 20, 0.5, -235)
+frame.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
 frame.BorderSizePixel = 0
 frame.Active = true
 frame.Draggable = true
@@ -257,27 +184,15 @@ stroke.Color = Color3.fromRGB(0, 170, 255); stroke.Thickness = 1.5; stroke.Paren
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 30)
 title.BackgroundTransparency = 1
-title.Text = "🌀 Spin Arm"
+title.Text = "🌀 Spin Arm (fixed)"
 title.TextColor3 = Color3.fromRGB(255, 255, 255)
 title.Font = Enum.Font.GothamBold
-title.TextSize = 16
+title.TextSize = 15
 title.Parent = frame
-
-local toggleBtn = Instance.new("TextButton")
-toggleBtn.Size = UDim2.new(1, -20, 0, 32)
-toggleBtn.Position = UDim2.new(0, 10, 0, 35)
-toggleBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
-toggleBtn.Text = "ВКЛ (R)"
-toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-toggleBtn.Font = Enum.Font.GothamBold
-toggleBtn.TextSize = 14
-toggleBtn.BorderSizePixel = 0
-toggleBtn.Parent = frame
-Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 6)
 
 local status = Instance.new("TextLabel")
 status.Size = UDim2.new(1, -20, 0, 16)
-status.Position = UDim2.new(0, 10, 0, 70)
+status.Position = UDim2.new(0, 10, 0, 32)
 status.BackgroundTransparency = 1
 status.Text = "Поиск..."
 status.TextColor3 = Color3.fromRGB(220, 180, 100)
@@ -286,27 +201,62 @@ status.TextSize = 11
 status.TextXAlignment = Enum.TextXAlignment.Left
 status.Parent = frame
 
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Size = UDim2.new(1, -20, 0, 30)
+toggleBtn.Position = UDim2.new(0, 10, 0, 52)
+toggleBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
+toggleBtn.Text = "ВРАЩЕНИЕ: ВКЛ (R)"
+toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleBtn.Font = Enum.Font.GothamBold
+toggleBtn.TextSize = 13
+toggleBtn.BorderSizePixel = 0
+toggleBtn.Parent = frame
+Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 6)
+
+local modeBtn = Instance.new("TextButton")
+modeBtn.Size = UDim2.new(1, -20, 0, 26)
+modeBtn.Position = UDim2.new(0, 10, 0, 86)
+modeBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 120)
+modeBtn.Text = "Режим: КРУЧЕНИЕ"
+modeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+modeBtn.Font = Enum.Font.GothamBold
+modeBtn.TextSize = 12
+modeBtn.BorderSizePixel = 0
+modeBtn.Parent = frame
+Instance.new("UICorner", modeBtn).CornerRadius = UDim.new(0, 6)
+
+modeBtn.MouseButton1Click:Connect(function()
+    SPIN_MODE = not SPIN_MODE
+    if SPIN_MODE then
+        modeBtn.Text = "Режим: КРУЧЕНИЕ"
+        modeBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 120)
+    else
+        modeBtn.Text = "Режим: ФИКС. УГОЛ"
+        modeBtn.BackgroundColor3 = Color3.fromRGB(120, 80, 40)
+    end
+end)
+
 local speedLabel = Instance.new("TextLabel")
-speedLabel.Size = UDim2.new(1, -20, 0, 20)
-speedLabel.Position = UDim2.new(0, 10, 0, 88)
+speedLabel.Size = UDim2.new(1, -20, 0, 16)
+speedLabel.Position = UDim2.new(0, 10, 0, 118)
 speedLabel.BackgroundTransparency = 1
 speedLabel.Text = "Скорость: " .. SPEED
 speedLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
 speedLabel.Font = Enum.Font.Gotham
-speedLabel.TextSize = 13
+speedLabel.TextSize = 12
 speedLabel.TextXAlignment = Enum.TextXAlignment.Left
 speedLabel.Parent = frame
 
 local sliderBg = Instance.new("Frame")
 sliderBg.Size = UDim2.new(1, -20, 0, 8)
-sliderBg.Position = UDim2.new(0, 10, 0, 116)
+sliderBg.Position = UDim2.new(0, 10, 0, 138)
 sliderBg.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
 sliderBg.BorderSizePixel = 0
 sliderBg.Parent = frame
 Instance.new("UICorner", sliderBg).CornerRadius = UDim.new(1, 0)
 
 local sliderFill = Instance.new("Frame")
-sliderFill.Size = UDim2.new(0.25, 0, 1, 0)
+sliderFill.Size = UDim2.new(0.15, 0, 1, 0)
 sliderFill.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
 sliderFill.BorderSizePixel = 0
 sliderFill.Parent = sliderBg
@@ -314,85 +264,128 @@ Instance.new("UICorner", sliderFill).CornerRadius = UDim.new(1, 0)
 
 local knob = Instance.new("TextButton")
 knob.Size = UDim2.new(0, 18, 0, 18)
-knob.Position = UDim2.new(0.25, -9, 0.5, -9)
+knob.Position = UDim2.new(0.15, -9, 0.5, -9)
 knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
 knob.Text = ""
 knob.BorderSizePixel = 0
 knob.Parent = sliderBg
 Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
 
-local function makeBtn(text, x, color, cb)
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.new(0, 60, 0, 26)
-    b.Position = UDim2.new(0, x, 0, 155)
-    b.BackgroundColor3 = color
-    b.Text = text
-    b.TextColor3 = Color3.fromRGB(255, 255, 255)
-    b.Font = Enum.Font.GothamBold
-    b.TextSize = 12
-    b.BorderSizePixel = 0
-    b.Parent = frame
-    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
-    b.MouseButton1Click:Connect(cb)
-    return b
-end
+local axisBtn = Instance.new("TextButton")
+axisBtn.Size = UDim2.new(1, -20, 0, 26)
+axisBtn.Position = UDim2.new(0, 10, 0, 156)
+axisBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 120)
+axisBtn.Text = "Ось: X"
+axisBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+axisBtn.Font = Enum.Font.GothamBold
+axisBtn.TextSize = 12
+axisBtn.BorderSizePixel = 0
+axisBtn.Parent = frame
+Instance.new("UICorner", axisBtn).CornerRadius = UDim.new(0, 6)
 
-local axisBtn = makeBtn("Ось: X", 10, Color3.fromRGB(80, 80, 120), function()
+axisBtn.MouseButton1Click:Connect(function()
     if AXIS == "X" then AXIS = "Y"
     elseif AXIS == "Y" then AXIS = "Z"
     else AXIS = "X" end
     axisBtn.Text = "Ось: " .. AXIS
 end)
 
-makeBtn("Сброс", 80, Color3.fromRGB(150, 50, 50), function()
-    SPEED = 5
-    speedLabel.Text = "Скорость: " .. SPEED
-    sliderFill.Size = UDim2.new(0.25, 0, 1, 0)
-    knob.Position = UDim2.new(0.25, -9, 0.5, -9)
+local sep = Instance.new("TextLabel")
+sep.Size = UDim2.new(1, -20, 0, 20)
+sep.Position = UDim2.new(0, 10, 0, 188)
+sep.BackgroundTransparency = 1
+sep.Text = "─── Фикс. углы ───"
+sep.TextColor3 = Color3.fromRGB(150, 150, 160)
+sep.Font = Enum.Font.Gotham
+sep.TextSize = 11
+sep.Parent = frame
+
+local ANGLES = {15, 45, 75, 90, 105, 120, 135, 150, 165, 180}
+local COLS, BTN_W, BTN_H, GAP = 3, 70, 28, 5
+local startY = 212
+
+local function highlightOnly(activeBtn)
+    for _, o in ipairs(frame:GetChildren()) do
+        if o:IsA("TextButton") and o.Name:sub(1, 5) == "Angle" then
+            o.BackgroundColor3 = Color3.fromRGB(55, 55, 70)
+        end
+    end
+    if activeBtn then activeBtn.BackgroundColor3 = Color3.fromRGB(255, 140, 0) end
+end
+
+for i, deg in ipairs(ANGLES) do
+    local col = (i - 1) % COLS
+    local row = math.floor((i - 1) / COLS)
+    local x = 10 + col * (BTN_W + GAP)
+    local y = startY + row * (BTN_H + GAP)
+
+    local b = Instance.new("TextButton")
+    b.Name = "Angle" .. deg
+    b.Size = UDim2.new(0, BTN_W, 0, BTN_H)
+    b.Position = UDim2.new(0, x, 0, y)
+    b.BackgroundColor3 = Color3.fromRGB(55, 55, 70)
+    b.Text = deg .. "°"
+    b.TextColor3 = Color3.fromRGB(255, 255, 255)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 13
+    b.BorderSizePixel = 0
+    b.Parent = frame
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+
+    b.MouseButton1Click:Connect(function()
+        SPIN_MODE = false
+        modeBtn.Text = "Режим: ФИКС. УГОЛ"
+        modeBtn.BackgroundColor3 = Color3.fromRGB(120, 80, 40)
+        HOLD_ANGLE = deg
+        angle = deg
+        apply(deg)
+        highlightOnly(b)
+    end)
+end
+
+local resetBtn = Instance.new("TextButton")
+resetBtn.Size = UDim2.new(1, -20, 0, 30)
+resetBtn.Position = UDim2.new(0, 10, 0, startY + 4 * (BTN_H + GAP) + 4)
+resetBtn.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+resetBtn.Text = "СБРОС"
+resetBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+resetBtn.Font = Enum.Font.GothamBold
+resetBtn.TextSize = 13
+resetBtn.BorderSizePixel = 0
+resetBtn.Parent = frame
+Instance.new("UICorner", resetBtn).CornerRadius = UDim.new(0, 6)
+
+resetBtn.MouseButton1Click:Connect(function()
+    HOLD_ANGLE = 0
+    angle = 0
+    reset()
+    highlightOnly(nil)
 end)
 
-makeBtn("ДАМП", 150, Color3.fromRGB(200, 120, 30), function()
-    if LP.Character then fullDump(LP.Character) end
-end)
-
-local function upd()
+local function updToggle()
     if enabled then
         toggleBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
-        toggleBtn.Text = "ВКЛ (R)"
+        toggleBtn.Text = "ВРАЩЕНИЕ: ВКЛ (R)"
     else
         toggleBtn.BackgroundColor3 = Color3.fromRGB(120, 40, 40)
-        toggleBtn.Text = "ВЫКЛ (R)"
+        toggleBtn.Text = "ВРАЩЕНИЕ: ВЫКЛ (R)"
+        reset()
     end
 end
 
 toggleBtn.MouseButton1Click:Connect(function()
     enabled = not enabled
-    upd()
+    updToggle()
 end)
 
--- Статус
-task.spawn(function()
-    while sg.Parent do
-        if target and target.Parent then
-            status.Text = "OK: " .. (targetType or "?") .. " / " .. target.Name
-            status.TextColor3 = Color3.fromRGB(120, 220, 120)
-        else
-            status.Text = "Не найден"
-            status.TextColor3 = Color3.fromRGB(220, 100, 100)
-        end
-        task.wait(0.5)
-    end
-end)
-
--- Слайдер
 local dragging = false
 local MAX_SPEED = 20
 local function updX(x)
     local rel = math.clamp((x - sliderBg.AbsolutePosition.X) / sliderBg.AbsoluteSize.X, 0, 1)
     sliderFill.Size = UDim2.new(rel, 0, 1, 0)
     knob.Position = UDim2.new(rel, -9, 0.5, -9)
-    SPEED = math.floor(rel * MAX_SPEED + 0.5)
-    speedLabel.Text = "Скорость: " .. SPEED
+    SPEED = math.max(0.1, rel * MAX_SPEED)
+    speedLabel.Text = "Скорость: " .. string.format("%.1f", SPEED)
 end
 
 knob.InputBegan:Connect(function(i)
@@ -414,7 +407,20 @@ end)
 
 UserInputService.InputBegan:Connect(function(i, gp)
     if gp then return end
-    if i.KeyCode == TOGGLE then enabled = not enabled; upd() end
+    if i.KeyCode == TOGGLE_KEY then enabled = not enabled; updToggle() end
+end)
+
+task.spawn(function()
+    while sg.Parent do
+        if node and node.Parent then
+            status.Text = "OK: " .. nodeType .. " / " .. rigType
+            status.TextColor3 = Color3.fromRGB(120, 220, 120)
+        else
+            status.Text = "Поиск узла..."
+            status.TextColor3 = Color3.fromRGB(220, 180, 100)
+        end
+        task.wait(0.5)
+    end
 end)
 
 print("[SpinArm] === ✅ Готово ===")
