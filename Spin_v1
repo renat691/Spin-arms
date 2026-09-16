@@ -1,6 +1,6 @@
 --[[
-    Spin Arm — FIXED
-    Пишем Transform в PreSimulation (ПОСЛЕ Animator)
+    Spin Arm v3 — обе руки
+    Режимы: ПРАВАЯ / ЛЕВАЯ / ОБЕ
     Работает на R6 и R15
 ]]
 
@@ -11,18 +11,75 @@ local LP = Players.LocalPlayer
 
 print("[SpinArm] === Старт ===")
 
+-- ===== Настройки =====
 local enabled = true
 local SPIN_MODE = true
 local SPEED = 3
 local AXIS = "X"
 local HOLD_ANGLE = 0
-local angle = 0
 local TOGGLE_KEY = Enum.KeyCode.R
+local HAND_MODE = "BOTH"       -- "Right" | "Left" | "BOTH"
+-- ====================
 
-local node, nodeType, origC0, origTransform, rigType = nil, nil, nil, nil, "?"
+-- Узлы для каждой руки
+local rightNode, rightType, rightC0, rightT = nil, nil, nil, nil
+local leftNode,  leftType,  leftC0,  leftT  = nil, nil, nil, nil
+local rigType = "?"
 
--- ===== Поиск =====
-local function findNode()
+-- Углы (для каждой руки отдельно)
+local angleR = 0
+local angleL = 0
+
+-- ===== Поиск для одной руки =====
+local function findSideNode(side)
+    local c = LP.Character
+    if not c then return nil end
+
+    local upperName, motorName, motorNameR6
+    if side == "Right" then
+        upperName, motorName, motorNameR6 = "RightUpperArm", "RightShoulder", "Right Shoulder"
+    else
+        upperName, motorName, motorNameR6 = "LeftUpperArm", "LeftShoulder", "Left Shoulder"
+    end
+
+    -- R15 новый (AC)
+    local ua = c:FindFirstChild(upperName)
+    if ua then
+        local t = ua:FindFirstChild(motorName)
+        if t and t:IsA("AnimationConstraint") then
+            return t, "AC", nil, nil
+        end
+        if t and t:IsA("Motor6D") then
+            return t, "Motor6D", t.C0, t.Transform
+        end
+    end
+
+    -- R6
+    local torso = c:FindFirstChild("Torso")
+    if torso then
+        local m = torso:FindFirstChild(motorNameR6)
+        if m and m:IsA("Motor6D") then
+            return m, "Motor6D", m.C0, m.Transform
+        end
+    end
+
+    -- Fallback по имени
+    for _, o in ipairs(c:GetDescendants()) do
+        if o:IsA("AnimationConstraint") then
+            local n = o.Name:gsub("[%s_%-]", ""):lower()
+            if n == motorName:lower() then return o, "AC", nil, nil end
+        end
+    end
+    for _, o in ipairs(c:GetDescendants()) do
+        if o:IsA("Motor6D") then
+            local n = o.Name:gsub("[%s_%-]", ""):lower()
+            if n == motorName:lower() then return o, "Motor6D", o.C0, o.Transform end
+        end
+    end
+    return nil
+end
+
+local function findBoth()
     local c = LP.Character
     if not c then return end
     local hum = c:FindFirstChildOfClass("Humanoid")
@@ -30,68 +87,41 @@ local function findNode()
         rigType = (hum.RigType == Enum.HumanoidRigType.R15) and "R15" or "R6"
     end
 
-    local rua = c:FindFirstChild("RightUpperArm")
-    if rua then
-        local t = rua:FindFirstChild("RightShoulder")
-        if t and t:IsA("AnimationConstraint") then
-            node, nodeType = t, "AC"
-            print("[SpinArm] ✅ AC (R15 новый)")
-            return
-        end
-        if t and t:IsA("Motor6D") then
-            node, nodeType = t, "Motor6D"
-            origC0, origTransform = t.C0, t.Transform
-            print("[SpinArm] ✅ Motor6D (R15)")
-            return
-        end
-    end
+    rightNode, rightType, rightC0, rightT = findSideNode("Right")
+    leftNode,  leftType,  leftC0,  leftT  = findSideNode("Left")
 
-    local torso = c:FindFirstChild("Torso")
-    if torso then
-        local m = torso:FindFirstChild("Right Shoulder")
-        if m and m:IsA("Motor6D") then
-            node, nodeType = m, "Motor6D"
-            origC0, origTransform = m.C0, m.Transform
-            print("[SpinArm] ✅ Motor6D (R6)")
-            return
-        end
+    if rightNode then
+        print("[SpinArm] ✅ Правая:", rightType, "(" .. rightNode.Name .. ")")
+    else
+        warn("[SpinArm] ❌ Правая не найдена")
     end
-
-    for _, o in ipairs(c:GetDescendants()) do
-        if o:IsA("AnimationConstraint") and o.Name:gsub("[%s_%-]",""):lower() == "rightshoulder" then
-            node, nodeType = o, "AC"
-            print("[SpinArm] ✅ AC (fallback)")
-            return
-        end
+    if leftNode then
+        print("[SpinArm] ✅ Левая:", leftType, "(" .. leftNode.Name .. ")")
+    else
+        warn("[SpinArm] ❌ Левая не найдена")
     end
-    for _, o in ipairs(c:GetDescendants()) do
-        if o:IsA("Motor6D") and o.Name:gsub("[%s_%-]",""):lower() == "rightshoulder" then
-            node, nodeType = o, "Motor6D"
-            origC0, origTransform = o.C0, o.Transform
-            print("[SpinArm] ✅ Motor6D (fallback)")
-            return
-        end
-    end
-    warn("[SpinArm] ❌ Не найден узел")
 end
 
 task.spawn(function()
     while true do
-        if LP.Character and (not node or not node.Parent) then
-            node, nodeType, origC0, origTransform = nil, nil, nil, nil
-            pcall(findNode)
+        if LP.Character then
+            local needR = not rightNode or not rightNode.Parent
+            local needL = not leftNode or not leftNode.Parent
+            if needR or needL then
+                pcall(findBoth)
+            end
         end
         task.wait(1)
     end
 end)
 
 LP.CharacterAdded:Connect(function()
-    node, nodeType, origC0, origTransform = nil, nil, nil, nil
+    rightNode, leftNode = nil, nil
     task.wait(1)
-    pcall(findNode)
+    pcall(findBoth)
 end)
 
--- ===== Вращение =====
+-- ===== Применение угла к одной руке =====
 local function getRotCF(deg)
     local r = math.rad(deg)
     if AXIS == "X" then return CFrame.Angles(r, 0, 0)
@@ -99,7 +129,7 @@ local function getRotCF(deg)
     else return CFrame.Angles(0, 0, r) end
 end
 
-local function apply(deg)
+local function applyTo(node, nodeType, origC0, deg)
     if not node or not node.Parent then return end
     local rot = getRotCF(deg)
     if nodeType == "AC" then
@@ -114,31 +144,42 @@ local function apply(deg)
     end
 end
 
-local function reset()
+local function resetSide(node, nodeType, origC0, origT)
     if not node then return end
     if nodeType == "AC" then
         pcall(function() node.Transform = CFrame.new() end)
     elseif nodeType == "Motor6D" then
         pcall(function()
             if origC0 then node.C0 = origC0 end
-            if origTransform then node.Transform = origTransform end
+            if origT then node.Transform = origT end
         end)
     end
 end
 
--- ⚠️ ГЛАВНОЕ ИСПРАВЛЕНИЕ: PreSimulation вместо BindToRenderStep
+-- ===== Главный цикл =====
 RunService.PreSimulation:Connect(function(dt)
-    if not node or not node.Parent then return end
     if not enabled then return end
 
     local deg
     if SPIN_MODE then
-        angle = (angle + dt * SPEED * 360) % 360
-        deg = angle
+        local d = dt * SPEED * 360
+        angleR = (angleR + d) % 360
+        angleL = (angleL + d) % 360
     else
-        deg = HOLD_ANGLE
+        angleR = HOLD_ANGLE
+        angleL = HOLD_ANGLE
     end
-    apply(deg)
+
+    if HAND_MODE == "Right" or HAND_MODE == "BOTH" then
+        if rightNode and rightNode.Parent then
+            applyTo(rightNode, rightType, rightC0, angleR)
+        end
+    end
+    if HAND_MODE == "Left" or HAND_MODE == "BOTH" then
+        if leftNode and leftNode.Parent then
+            applyTo(leftNode, leftType, leftC0, angleL)
+        end
+    end
 end)
 
 -- ===== GUI =====
@@ -170,8 +211,8 @@ if not okP or not sg.Parent then
 end
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 240, 0, 470)
-frame.Position = UDim2.new(0, 20, 0.5, -235)
+frame.Size = UDim2.new(0, 250, 0, 500)
+frame.Position = UDim2.new(0, 20, 0.5, -250)
 frame.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
 frame.BorderSizePixel = 0
 frame.Active = true
@@ -184,26 +225,92 @@ stroke.Color = Color3.fromRGB(0, 170, 255); stroke.Thickness = 1.5; stroke.Paren
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 30)
 title.BackgroundTransparency = 1
-title.Text = "🌀 Spin Arm (fixed)"
+title.Text = "🌀 Spin Arm v3 (обе руки)"
 title.TextColor3 = Color3.fromRGB(255, 255, 255)
 title.Font = Enum.Font.GothamBold
-title.TextSize = 15
+title.TextSize = 14
 title.Parent = frame
 
 local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, -20, 0, 16)
+status.Size = UDim2.new(1, -20, 0, 28)
 status.Position = UDim2.new(0, 10, 0, 32)
 status.BackgroundTransparency = 1
 status.Text = "Поиск..."
 status.TextColor3 = Color3.fromRGB(220, 180, 100)
 status.Font = Enum.Font.Gotham
-status.TextSize = 11
+status.TextSize = 10
 status.TextXAlignment = Enum.TextXAlignment.Left
+status.TextWrapped = true
 status.Parent = frame
 
+-- ===== Кнопки выбора руки (3 штуки) =====
+local btnR = Instance.new("TextButton")
+btnR.Size = UDim2.new(0.333, -8, 0, 28)
+btnR.Position = UDim2.new(0, 8, 0, 64)
+btnR.BackgroundColor3 = Color3.fromRGB(55, 55, 70)
+btnR.Text = "ПРАВАЯ"
+btnR.TextColor3 = Color3.fromRGB(255, 255, 255)
+btnR.Font = Enum.Font.GothamBold
+btnR.TextSize = 11
+btnR.BorderSizePixel = 0
+btnR.Parent = frame
+Instance.new("UICorner", btnR).CornerRadius = UDim.new(0, 6)
+
+local btnL = Instance.new("TextButton")
+btnL.Size = UDim2.new(0.333, -8, 0, 28)
+btnL.Position = UDim2.new(0.333, 2, 0, 64)
+btnL.BackgroundColor3 = Color3.fromRGB(55, 55, 70)
+btnL.Text = "ЛЕВАЯ"
+btnL.TextColor3 = Color3.fromRGB(255, 255, 255)
+btnL.Font = Enum.Font.GothamBold
+btnL.TextSize = 11
+btnL.BorderSizePixel = 0
+btnL.Parent = frame
+Instance.new("UICorner", btnL).CornerRadius = UDim.new(0, 6)
+
+local btnB = Instance.new("TextButton")
+btnB.Size = UDim2.new(0.333, -8, 0, 28)
+btnB.Position = UDim2.new(0.666, -4, 0, 64)
+btnB.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
+btnB.Text = "ОБЕ"
+btnB.TextColor3 = Color3.fromRGB(255, 255, 255)
+btnB.Font = Enum.Font.GothamBold
+btnB.TextSize = 11
+btnB.BorderSizePixel = 0
+btnB.Parent = frame
+Instance.new("UICorner", btnB).CornerRadius = UDim.new(0, 6)
+
+local function setHandMode(m)
+    if HAND_MODE == m then return end
+
+    -- Сбросить ту, которая была активна, но теперь не будет
+    local wasR = (HAND_MODE == "Right" or HAND_MODE == "BOTH")
+    local wasL = (HAND_MODE == "Left" or HAND_MODE == "BOTH")
+    local nowR = (m == "Right" or m == "BOTH")
+    local nowL = (m == "Left" or m == "BOTH")
+
+    if wasR and not nowR then resetSide(rightNode, rightType, rightC0, rightT) end
+    if wasL and not nowL then resetSide(leftNode,  leftType,  leftC0,  leftT)  end
+
+    HAND_MODE = m
+    angleR = 0
+    angleL = 0
+    HOLD_ANGLE = 0
+    highlightOnly(nil)
+
+    btnR.BackgroundColor3 = (m == "Right" or m == "BOTH") and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(55, 55, 70)
+    btnL.BackgroundColor3 = (m == "Left"  or m == "BOTH") and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(55, 55, 70)
+    btnB.BackgroundColor3 = (m == "BOTH") and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(55, 55, 70)
+end
+
+btnR.MouseButton1Click:Connect(function() setHandMode("Right") end)
+btnL.MouseButton1Click:Connect(function() setHandMode("Left") end)
+btnB.MouseButton1Click:Connect(function() setHandMode("BOTH") end)
+
+-- ВКЛ/ВЫКЛ
 local toggleBtn = Instance.new("TextButton")
 toggleBtn.Size = UDim2.new(1, -20, 0, 30)
-toggleBtn.Position = UDim2.new(0, 10, 0, 52)
+toggleBtn.Position = UDim2.new(0, 10, 0, 98)
 toggleBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
 toggleBtn.Text = "ВРАЩЕНИЕ: ВКЛ (R)"
 toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -213,9 +320,10 @@ toggleBtn.BorderSizePixel = 0
 toggleBtn.Parent = frame
 Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 6)
 
+-- Режим
 local modeBtn = Instance.new("TextButton")
 modeBtn.Size = UDim2.new(1, -20, 0, 26)
-modeBtn.Position = UDim2.new(0, 10, 0, 86)
+modeBtn.Position = UDim2.new(0, 10, 0, 132)
 modeBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 120)
 modeBtn.Text = "Режим: КРУЧЕНИЕ"
 modeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -236,9 +344,10 @@ modeBtn.MouseButton1Click:Connect(function()
     end
 end)
 
+-- Скорость
 local speedLabel = Instance.new("TextLabel")
 speedLabel.Size = UDim2.new(1, -20, 0, 16)
-speedLabel.Position = UDim2.new(0, 10, 0, 118)
+speedLabel.Position = UDim2.new(0, 10, 0, 162)
 speedLabel.BackgroundTransparency = 1
 speedLabel.Text = "Скорость: " .. SPEED
 speedLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
@@ -249,7 +358,7 @@ speedLabel.Parent = frame
 
 local sliderBg = Instance.new("Frame")
 sliderBg.Size = UDim2.new(1, -20, 0, 8)
-sliderBg.Position = UDim2.new(0, 10, 0, 138)
+sliderBg.Position = UDim2.new(0, 10, 0, 182)
 sliderBg.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
 sliderBg.BorderSizePixel = 0
 sliderBg.Parent = frame
@@ -271,9 +380,10 @@ knob.BorderSizePixel = 0
 knob.Parent = sliderBg
 Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
 
+-- Ось
 local axisBtn = Instance.new("TextButton")
 axisBtn.Size = UDim2.new(1, -20, 0, 26)
-axisBtn.Position = UDim2.new(0, 10, 0, 156)
+axisBtn.Position = UDim2.new(0, 10, 0, 200)
 axisBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 120)
 axisBtn.Text = "Ось: X"
 axisBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -292,7 +402,7 @@ end)
 
 local sep = Instance.new("TextLabel")
 sep.Size = UDim2.new(1, -20, 0, 20)
-sep.Position = UDim2.new(0, 10, 0, 188)
+sep.Position = UDim2.new(0, 10, 0, 232)
 sep.BackgroundTransparency = 1
 sep.Text = "─── Фикс. углы ───"
 sep.TextColor3 = Color3.fromRGB(150, 150, 160)
@@ -301,10 +411,10 @@ sep.TextSize = 11
 sep.Parent = frame
 
 local ANGLES = {15, 45, 75, 90, 105, 120, 135, 150, 165, 180}
-local COLS, BTN_W, BTN_H, GAP = 3, 70, 28, 5
-local startY = 212
+local COLS, BTN_W, BTN_H, GAP = 3, 74, 28, 5
+local startY = 256
 
-local function highlightOnly(activeBtn)
+function highlightOnly(activeBtn)
     for _, o in ipairs(frame:GetChildren()) do
         if o:IsA("TextButton") and o.Name:sub(1, 5) == "Angle" then
             o.BackgroundColor3 = Color3.fromRGB(55, 55, 70)
@@ -337,17 +447,26 @@ for i, deg in ipairs(ANGLES) do
         modeBtn.Text = "Режим: ФИКС. УГОЛ"
         modeBtn.BackgroundColor3 = Color3.fromRGB(120, 80, 40)
         HOLD_ANGLE = deg
-        angle = deg
-        apply(deg)
+        angleR = deg
+        angleL = deg
+
+        -- применить ко всем активным
+        if HAND_MODE == "Right" or HAND_MODE == "BOTH" then
+            applyTo(rightNode, rightType, rightC0, deg)
+        end
+        if HAND_MODE == "Left" or HAND_MODE == "BOTH" then
+            applyTo(leftNode, leftType, leftC0, deg)
+        end
         highlightOnly(b)
     end)
 end
 
+-- Сброс
 local resetBtn = Instance.new("TextButton")
 resetBtn.Size = UDim2.new(1, -20, 0, 30)
 resetBtn.Position = UDim2.new(0, 10, 0, startY + 4 * (BTN_H + GAP) + 4)
 resetBtn.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
-resetBtn.Text = "СБРОС"
+resetBtn.Text = "СБРОС (обе руки)"
 resetBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 resetBtn.Font = Enum.Font.GothamBold
 resetBtn.TextSize = 13
@@ -357,8 +476,10 @@ Instance.new("UICorner", resetBtn).CornerRadius = UDim.new(0, 6)
 
 resetBtn.MouseButton1Click:Connect(function()
     HOLD_ANGLE = 0
-    angle = 0
-    reset()
+    angleR = 0
+    angleL = 0
+    resetSide(rightNode, rightType, rightC0, rightT)
+    resetSide(leftNode, leftType, leftC0, leftT)
     highlightOnly(nil)
 end)
 
@@ -369,7 +490,8 @@ local function updToggle()
     else
         toggleBtn.BackgroundColor3 = Color3.fromRGB(120, 40, 40)
         toggleBtn.Text = "ВРАЩЕНИЕ: ВЫКЛ (R)"
-        reset()
+        resetSide(rightNode, rightType, rightC0, rightT)
+        resetSide(leftNode, leftType, leftC0, leftT)
     end
 end
 
@@ -378,6 +500,7 @@ toggleBtn.MouseButton1Click:Connect(function()
     updToggle()
 end)
 
+-- Слайдер
 local dragging = false
 local MAX_SPEED = 20
 local function updX(x)
@@ -405,22 +528,30 @@ UserInputService.InputEnded:Connect(function(i)
         or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
 end)
 
+-- Хоткей
 UserInputService.InputBegan:Connect(function(i, gp)
     if gp then return end
-    if i.KeyCode == TOGGLE_KEY then enabled = not enabled; updToggle() end
+    if i.KeyCode == TOGGLE_KEY then
+        enabled = not enabled
+        updToggle()
+    end
 end)
 
+-- Статус
 task.spawn(function()
     while sg.Parent do
-        if node and node.Parent then
-            status.Text = "OK: " .. nodeType .. " / " .. rigType
+        local r = (rightNode and rightNode.Parent) and "R✅" or "R❌"
+        local l = (leftNode and leftNode.Parent) and "L✅" or "L❌"
+        status.Text = r .. " " .. l .. " | " .. rigType .. " | режим: " .. HAND_MODE
+        if (rightNode and rightNode.Parent) and (leftNode and leftNode.Parent) then
             status.TextColor3 = Color3.fromRGB(120, 220, 120)
+        elseif rightNode and rightNode.Parent or leftNode and leftNode.Parent then
+            status.TextColor3 = Color3.fromRGB(220, 200, 100)
         else
-            status.Text = "Поиск узла..."
-            status.TextColor3 = Color3.fromRGB(220, 180, 100)
+            status.TextColor3 = Color3.fromRGB(220, 100, 100)
         end
         task.wait(0.5)
     end
 end)
 
-print("[SpinArm] === ✅ Готово ===")
+print("[SpinArm] === ✅ Готово. R — вкл/выкл ===")
