@@ -1,0 +1,334 @@
+--[[
+    Spin Arm — исправленная версия
+    - Работает и в R6, и в R15
+    - GUI создаётся в защищённом контейнере (gethui / CoreGui)
+    - Вращение руки у себя + попытка через анимацию
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LP = Players.LocalPlayer
+
+print("[SpinArm] === Старт скрипта ===")
+
+-- ================= НАСТРОЙКИ =================
+local enabled = true
+local SPEED   = 5
+local AXIS    = "X"        -- "X", "Y", "Z"
+local TOGGLE  = Enum.KeyCode.R
+-- ============================================
+
+local angle = 0
+local motor, origC0, char
+
+-- ================= ПОИСК МОТОРА =================
+local function findMotor(c)
+    if not c then return nil end
+    -- 1) по имени
+    for _, o in ipairs(c:GetDescendants()) do
+        if o:IsA("Motor6D") then
+            local n = o.Name:gsub("%s", ""):lower()
+            if n == "rightshoulder" then return o end
+        end
+    end
+    -- 2) по Part1 (правая рука)
+    for _, o in ipairs(c:GetDescendants()) do
+        if o:IsA("Motor6D") and o.Part1 then
+            local n = o.Part1.Name:gsub("%s", ""):lower()
+            if n == "rightarm" or n == "rightupperarm" then
+                return o
+            end
+        end
+    end
+    return nil
+end
+
+local function bindChar(c)
+    char = c
+    local h = c:WaitForChild("Humanoid", 10)
+    if not h then
+        warn("[SpinArm] Humanoid не найден")
+        return
+    end
+    task.wait(0.6)
+    motor = findMotor(c)
+    if motor then
+        origC0 = motor.C0
+        print("[SpinArm] ✅ Мотор найден:", motor:GetFullName())
+    else
+        warn("[SpinArm] ❌ Мотор правого плеча не найден")
+    end
+end
+
+if LP.Character then
+    task.spawn(bindChar, LP.Character)
+end
+LP.CharacterAdded:Connect(function(c)
+    task.wait(0.5)
+    bindChar(c)
+end)
+
+-- ================= ЦИКЛ ВРАЩЕНИЯ =================
+RunService.RenderStepped:Connect(function(dt)
+    if not enabled then return end
+    if not motor or not motor.Parent or not origC0 then return end
+
+    angle += dt * SPEED * math.pi * 2
+
+    local r
+    if AXIS == "X" then r = CFrame.Angles(angle, 0, 0)
+    elseif AXIS == "Y" then r = CFrame.Angles(0, angle, 0)
+    else r = CFrame.Angles(0, 0, angle) end
+
+    pcall(function()
+        motor.C0 = r * origC0
+    end)
+end)
+
+-- ================= GUI =================
+-- Получаем родителя для ScreenGui (защищённый, если возможно)
+local function getGuiParent()
+    -- gethui() — лучший вариант (Delta, Synapse, Krnl и др.)
+    if type(gethui) == "function" then
+        local ok, hui = pcall(gethui)
+        if ok and hui then
+            print("[SpinArm] Родитель GUI: gethui()")
+            return hui
+        end
+    end
+    -- CoreGui (защищённый)
+    local CoreGui = game:GetService("CoreGui")
+    print("[SpinArm] Родитель GUI: CoreGui")
+    return CoreGui
+end
+
+local sg = Instance.new("ScreenGui")
+sg.Name = "SpinArmGui"
+sg.ResetOnSpawn = false
+sg.IgnoreGuiInset = true
+sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+sg.DisplayOrder = 999999
+
+-- protect_gui (Synapse/Delta) — прячет от обнаружения
+if syn and syn.protect_gui then
+    pcall(function() syn.protect_gui(sg) end)
+    print("[SpinArm] syn.protect_gui применён")
+end
+
+local parentGui = getGuiParent()
+local okParent = pcall(function() sg.Parent = parentGui end)
+
+if not okParent then
+    print("[SpinArm] ⚠ Защищённый родитель не сработал, ставим в PlayerGui")
+    local pg = LP:FindFirstChildOfClass("PlayerGui")
+    if not pg then pg = LP:WaitForChild("PlayerGui", 10) end
+    if pg then
+        sg.Parent = pg
+    else
+        warn("[SpinArm] ❌ PlayerGui тоже нет — GUI не создать")
+        return
+    end
+end
+
+print("[SpinArm] ✅ ScreenGui создан в", tostring(sg.Parent))
+
+-- ==== Рамка ====
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, 220, 0, 195)
+frame.Position = UDim2.new(0, 20, 0.5, -100)
+frame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+frame.BorderSizePixel = 0
+frame.Active = true
+frame.Draggable = true
+frame.Parent = sg
+
+local c0 = Instance.new("UICorner"); c0.CornerRadius = UDim.new(0, 10); c0.Parent = frame
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(0, 170, 255)
+stroke.Thickness = 1.5
+stroke.Parent = frame
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0, 30)
+title.BackgroundTransparency = 1
+title.Text = "🌀 Spin Arm"
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 16
+title.Parent = frame
+
+-- ==== Кнопка вкл/выкл ====
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Size = UDim2.new(1, -20, 0, 32)
+toggleBtn.Position = UDim2.new(0, 10, 0, 35)
+toggleBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
+toggleBtn.Text = "ВКЛ (R)"
+toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleBtn.Font = Enum.Font.GothamBold
+toggleBtn.TextSize = 14
+toggleBtn.BorderSizePixel = 0
+toggleBtn.Parent = frame
+local c1 = Instance.new("UICorner"); c1.CornerRadius = UDim.new(0, 6); c1.Parent = toggleBtn
+
+-- ==== Статус ====
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, -20, 0, 16)
+status.Position = UDim2.new(0, 10, 0, 70)
+status.BackgroundTransparency = 1
+status.Text = "Мотор: поиск..."
+status.TextColor3 = Color3.fromRGB(220, 180, 100)
+status.Font = Enum.Font.Gotham
+status.TextSize = 11
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.Parent = frame
+
+-- ==== Скорость ====
+local speedLabel = Instance.new("TextLabel")
+speedLabel.Size = UDim2.new(1, -20, 0, 20)
+speedLabel.Position = UDim2.new(0, 10, 0, 88)
+speedLabel.BackgroundTransparency = 1
+speedLabel.Text = "Скорость: " .. SPEED
+speedLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+speedLabel.Font = Enum.Font.Gotham
+speedLabel.TextSize = 13
+speedLabel.TextXAlignment = Enum.TextXAlignment.Left
+speedLabel.Parent = frame
+
+-- ==== Слайдер ====
+local sliderBg = Instance.new("Frame")
+sliderBg.Size = UDim2.new(1, -20, 0, 8)
+sliderBg.Position = UDim2.new(0, 10, 0, 116)
+sliderBg.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+sliderBg.BorderSizePixel = 0
+sliderBg.Parent = frame
+local c2 = Instance.new("UICorner"); c2.CornerRadius = UDim.new(1, 0); c2.Parent = sliderBg
+
+local sliderFill = Instance.new("Frame")
+sliderFill.Size = UDim2.new(0.25, 0, 1, 0)
+sliderFill.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
+sliderFill.BorderSizePixel = 0
+sliderFill.Parent = sliderBg
+local c3 = Instance.new("UICorner"); c3.CornerRadius = UDim.new(1, 0); c3.Parent = sliderFill
+
+local knob = Instance.new("TextButton")
+knob.Size = UDim2.new(0, 18, 0, 18)
+knob.Position = UDim2.new(0.25, -9, 0.5, -9)
+knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+knob.Text = ""
+knob.BorderSizePixel = 0
+knob.Parent = sliderBg
+local c4 = Instance.new("UICorner"); c4.CornerRadius = UDim.new(1, 0); c4.Parent = knob
+
+-- ==== Кнопки ====
+local function makeBtn(text, x, color, cb)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0, 60, 0, 26)
+    b.Position = UDim2.new(0, x, 0, 155)
+    b.BackgroundColor3 = color
+    b.Text = text
+    b.TextColor3 = Color3.fromRGB(255, 255, 255)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 12
+    b.BorderSizePixel = 0
+    b.Parent = frame
+    local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(0, 6); bc.Parent = b
+    b.MouseButton1Click:Connect(cb)
+    return b
+end
+
+local axisBtn = makeBtn("Ось: X", 10, Color3.fromRGB(80, 80, 120), function()
+    if AXIS == "X" then AXIS = "Y"
+    elseif AXIS == "Y" then AXIS = "Z"
+    else AXIS = "X" end
+    axisBtn.Text = "Ось: " .. AXIS
+end)
+
+makeBtn("Сброс", 80, Color3.fromRGB(150, 50, 50), function()
+    SPEED = 5
+    speedLabel.Text = "Скорость: " .. SPEED
+    sliderFill.Size = UDim2.new(0.25, 0, 1, 0)
+    knob.Position = UDim2.new(0.25, -9, 0.5, -9)
+end)
+
+makeBtn("R = вкл", 150, Color3.fromRGB(60, 60, 80), function() end)
+
+local function upd()
+    if enabled then
+        toggleBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
+        toggleBtn.Text = "ВКЛ (R)"
+    else
+        toggleBtn.BackgroundColor3 = Color3.fromRGB(120, 40, 40)
+        toggleBtn.Text = "ВЫКЛ (R)"
+    end
+end
+
+toggleBtn.MouseButton1Click:Connect(function()
+    enabled = not enabled
+    upd()
+end)
+
+-- ==== Обновление статуса ====
+task.spawn(function()
+    while sg.Parent do
+        if motor and motor.Parent then
+            status.Text = "Мотор: OK (" .. motor.Name .. ")"
+            status.TextColor3 = Color3.fromRGB(120, 220, 120)
+        else
+            status.Text = "Мотор: поиск..."
+            status.TextColor3 = Color3.fromRGB(220, 180, 100)
+        end
+        task.wait(0.5)
+    end
+end)
+
+-- ==== Слайдер drag ====
+local dragging = false
+local MAX_SPEED = 20
+
+local function updX(x)
+    local rel = math.clamp((x - sliderBg.AbsolutePosition.X) / sliderBg.AbsoluteSize.X, 0, 1)
+    sliderFill.Size = UDim2.new(rel, 0, 1, 0)
+    knob.Position = UDim2.new(rel, -9, 0.5, -9)
+    SPEED = math.floor(rel * MAX_SPEED + 0.5)
+    speedLabel.Text = "Скорость: " .. SPEED
+end
+
+knob.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1
+        or i.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+    end
+end)
+
+sliderBg.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1
+        or i.UserInputType == Enum.UserInputType.Touch then
+        updX(i.Position.X)
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(i)
+    if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement
+        or i.UserInputType == Enum.UserInputType.Touch) then
+        updX(i.Position.X)
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1
+        or i.UserInputType == Enum.UserInputType.Touch then
+        dragging = false
+    end
+end)
+
+-- ==== Хоткей ====
+UserInputService.InputBegan:Connect(function(i, gp)
+    if gp then return end
+    if i.KeyCode == TOGGLE then
+        enabled = not enabled
+        upd()
+    end
+end)
+
+print("[SpinArm] === ✅ Готово. R — вкл/выкл ===")
