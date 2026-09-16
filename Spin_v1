@@ -1,8 +1,8 @@
 --[[
-    Spin Arm — исправленная версия
-    - Работает и в R6, и в R15
-    - GUI создаётся в защищённом контейнере (gethui / CoreGui)
-    - Вращение руки у себя + попытка через анимацию
+    Spin Arm — финальная версия
+    - Авто-поиск мотора каждую секунду (не пропустит загрузку)
+    - Работает в R6, R15, кастомных ригах
+    - GUI появляется всегда
 ]]
 
 local Players = game:GetService("Players")
@@ -10,72 +10,85 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LP = Players.LocalPlayer
 
-print("[SpinArm] === Старт скрипта ===")
+print("[SpinArm] === Старт ===")
 
 -- ================= НАСТРОЙКИ =================
 local enabled = true
 local SPEED   = 5
-local AXIS    = "X"        -- "X", "Y", "Z"
+local AXIS    = "X"
 local TOGGLE  = Enum.KeyCode.R
 -- ============================================
 
 local angle = 0
-local motor, origC0, char
+local motor, origC0
 
--- ================= ПОИСК МОТОРА =================
-local function findMotor(c)
+-- ================= ПОИСК МОТОРА (широкий) =================
+local function findMotor()
+    local c = LP.Character
     if not c then return nil end
-    -- 1) по имени
+
+    local best
+    -- 1) точное имя (R6: "Right Shoulder", R15: "RightShoulder")
     for _, o in ipairs(c:GetDescendants()) do
         if o:IsA("Motor6D") then
-            local n = o.Name:gsub("%s", ""):lower()
+            local n = o.Name:gsub("[%s_%-]", ""):lower()
             if n == "rightshoulder" then return o end
+            if not best and n:find("rightshoulder") then best = o end
         end
     end
-    -- 2) по Part1 (правая рука)
+
+    -- 2) по Part1 — правая рука
     for _, o in ipairs(c:GetDescendants()) do
         if o:IsA("Motor6D") and o.Part1 then
-            local n = o.Part1.Name:gsub("%s", ""):lower()
-            if n == "rightarm" or n == "rightupperarm" then
-                return o
+            local n = o.Part1.Name:gsub("[%s_%-]", ""):lower()
+            if n == "rightarm" or n == "rightupperarm" then return o end
+            if not best and n:find("right") and n:find("arm") then best = o end
+        end
+    end
+
+    -- 3) по Part0 (торс) + Part1 (рука)
+    for _, o in ipairs(c:GetDescendants()) do
+        if o:IsA("Motor6D") and o.Part0 and o.Part1 then
+            local p0 = o.Part0.Name:lower()
+            local p1 = o.Part1.Name:lower()
+            if (p0:find("torso") or p0:find("chest") or p0:find("upper"))
+               and p1:find("right") and p1:find("arm") then
+                if not best then best = o end
             end
         end
     end
-    return nil
+
+    return best
 end
 
-local function bindChar(c)
-    char = c
-    local h = c:WaitForChild("Humanoid", 10)
-    if not h then
-        warn("[SpinArm] Humanoid не найден")
-        return
+-- ================= АВТО-ПРИВЯЗКА (в цикле) =================
+local lastMotor
+task.spawn(function()
+    while true do
+        if LP.Character then
+            local m = findMotor()
+            if m and m ~= motor then
+                motor = m
+                origC0 = m.C0
+                print("[SpinArm] ✅ Мотор найден:", m:GetFullName())
+                lastMotor = m
+            elseif not m and motor and not motor.Parent then
+                motor = nil
+                origC0 = nil
+                print("[SpinArm] Мотор пропал, ищу снова...")
+            end
+        end
+        task.wait(1)
     end
-    task.wait(0.6)
-    motor = findMotor(c)
-    if motor then
-        origC0 = motor.C0
-        print("[SpinArm] ✅ Мотор найден:", motor:GetFullName())
-    else
-        warn("[SpinArm] ❌ Мотор правого плеча не найден")
-    end
-end
-
-if LP.Character then
-    task.spawn(bindChar, LP.Character)
-end
-LP.CharacterAdded:Connect(function(c)
-    task.wait(0.5)
-    bindChar(c)
 end)
 
--- ================= ЦИКЛ ВРАЩЕНИЯ =================
+-- ================= ВРАЩЕНИЕ =================
 RunService.RenderStepped:Connect(function(dt)
     if not enabled then return end
-    if not motor or not motor.Parent or not origC0 then return end
+    if not motor or not origC0 then return end
+    if not motor.Parent then return end
 
     angle += dt * SPEED * math.pi * 2
-
     local r
     if AXIS == "X" then r = CFrame.Angles(angle, 0, 0)
     elseif AXIS == "Y" then r = CFrame.Angles(0, angle, 0)
@@ -87,21 +100,20 @@ RunService.RenderStepped:Connect(function(dt)
 end)
 
 -- ================= GUI =================
--- Получаем родителя для ScreenGui (защищённый, если возможно)
 local function getGuiParent()
-    -- gethui() — лучший вариант (Delta, Synapse, Krnl и др.)
     if type(gethui) == "function" then
         local ok, hui = pcall(gethui)
-        if ok and hui then
-            print("[SpinArm] Родитель GUI: gethui()")
-            return hui
-        end
+        if ok and hui then return hui end
     end
-    -- CoreGui (защищённый)
-    local CoreGui = game:GetService("CoreGui")
-    print("[SpinArm] Родитель GUI: CoreGui")
-    return CoreGui
+    return game:GetService("CoreGui")
 end
+
+-- удалить старый если был
+local old = (function()
+    local ok, h = pcall(getGuiParent)
+    if ok and h then return h:FindFirstChild("SpinArmGui") end
+end)()
+if old then old:Destroy() end
 
 local sg = Instance.new("ScreenGui")
 sg.Name = "SpinArmGui"
@@ -110,32 +122,22 @@ sg.IgnoreGuiInset = true
 sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 sg.DisplayOrder = 999999
 
--- protect_gui (Synapse/Delta) — прячет от обнаружения
-if syn and syn.protect_gui then
-    pcall(function() syn.protect_gui(sg) end)
-    print("[SpinArm] syn.protect_gui применён")
+if syn and syn.protect_gui then pcall(function() syn.protect_gui(sg) end) end
+
+local okParent = pcall(function() sg.Parent = getGuiParent() end)
+if not okParent or not sg.Parent then
+    local pg = LP:FindFirstChildOfClass("PlayerGui") or LP:WaitForChild("PlayerGui", 10)
+    if pg then sg.Parent = pg end
 end
 
-local parentGui = getGuiParent()
-local okParent = pcall(function() sg.Parent = parentGui end)
-
-if not okParent then
-    print("[SpinArm] ⚠ Защищённый родитель не сработал, ставим в PlayerGui")
-    local pg = LP:FindFirstChildOfClass("PlayerGui")
-    if not pg then pg = LP:WaitForChild("PlayerGui", 10) end
-    if pg then
-        sg.Parent = pg
-    else
-        warn("[SpinArm] ❌ PlayerGui тоже нет — GUI не создать")
-        return
-    end
+if not sg.Parent then
+    warn("[SpinArm] ❌ Не удалось создать GUI")
+    return
 end
+print("[SpinArm] GUI создан в", sg.Parent:GetFullName())
 
-print("[SpinArm] ✅ ScreenGui создан в", tostring(sg.Parent))
-
--- ==== Рамка ====
 local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 220, 0, 195)
+frame.Size = UDim2.new(0, 220, 0, 200)
 frame.Position = UDim2.new(0, 20, 0.5, -100)
 frame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
 frame.BorderSizePixel = 0
@@ -144,10 +146,7 @@ frame.Draggable = true
 frame.Parent = sg
 
 local c0 = Instance.new("UICorner"); c0.CornerRadius = UDim.new(0, 10); c0.Parent = frame
-local stroke = Instance.new("UIStroke")
-stroke.Color = Color3.fromRGB(0, 170, 255)
-stroke.Thickness = 1.5
-stroke.Parent = frame
+local stroke = Instance.new("UIStroke"); stroke.Color = Color3.fromRGB(0, 170, 255); stroke.Thickness = 1.5; stroke.Parent = frame
 
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 30)
@@ -158,7 +157,6 @@ title.Font = Enum.Font.GothamBold
 title.TextSize = 16
 title.Parent = frame
 
--- ==== Кнопка вкл/выкл ====
 local toggleBtn = Instance.new("TextButton")
 toggleBtn.Size = UDim2.new(1, -20, 0, 32)
 toggleBtn.Position = UDim2.new(0, 10, 0, 35)
@@ -171,7 +169,6 @@ toggleBtn.BorderSizePixel = 0
 toggleBtn.Parent = frame
 local c1 = Instance.new("UICorner"); c1.CornerRadius = UDim.new(0, 6); c1.Parent = toggleBtn
 
--- ==== Статус ====
 local status = Instance.new("TextLabel")
 status.Size = UDim2.new(1, -20, 0, 16)
 status.Position = UDim2.new(0, 10, 0, 70)
@@ -183,7 +180,6 @@ status.TextSize = 11
 status.TextXAlignment = Enum.TextXAlignment.Left
 status.Parent = frame
 
--- ==== Скорость ====
 local speedLabel = Instance.new("TextLabel")
 speedLabel.Size = UDim2.new(1, -20, 0, 20)
 speedLabel.Position = UDim2.new(0, 10, 0, 88)
@@ -195,7 +191,6 @@ speedLabel.TextSize = 13
 speedLabel.TextXAlignment = Enum.TextXAlignment.Left
 speedLabel.Parent = frame
 
--- ==== Слайдер ====
 local sliderBg = Instance.new("Frame")
 sliderBg.Size = UDim2.new(1, -20, 0, 8)
 sliderBg.Position = UDim2.new(0, 10, 0, 116)
@@ -220,7 +215,6 @@ knob.BorderSizePixel = 0
 knob.Parent = sliderBg
 local c4 = Instance.new("UICorner"); c4.CornerRadius = UDim.new(1, 0); c4.Parent = knob
 
--- ==== Кнопки ====
 local function makeBtn(text, x, color, cb)
     local b = Instance.new("TextButton")
     b.Size = UDim2.new(0, 60, 0, 26)
@@ -251,7 +245,17 @@ makeBtn("Сброс", 80, Color3.fromRGB(150, 50, 50), function()
     knob.Position = UDim2.new(0.25, -9, 0.5, -9)
 end)
 
-makeBtn("R = вкл", 150, Color3.fromRGB(60, 60, 80), function() end)
+makeBtn("Дамп", 150, Color3.fromRGB(60, 60, 80), function()
+    print("[Dump] === Моторы персонажа ===")
+    local c = LP.Character
+    if not c then print("нет персонажа") return end
+    for _, o in ipairs(c:GetDescendants()) do
+        if o:IsA("Motor6D") then
+            print("  Motor6D:", o.Name, "| P0:", o.Part0 and o.Part0.Name or "?", "| P1:", o.Part1 and o.Part1.Name or "?")
+        end
+    end
+    print("[Dump] === Конец ===")
+end)
 
 local function upd()
     if enabled then
@@ -268,7 +272,7 @@ toggleBtn.MouseButton1Click:Connect(function()
     upd()
 end)
 
--- ==== Обновление статуса ====
+-- Обновление статуса
 task.spawn(function()
     while sg.Parent do
         if motor and motor.Parent then
@@ -282,10 +286,9 @@ task.spawn(function()
     end
 end)
 
--- ==== Слайдер drag ====
+-- Слайдер
 local dragging = false
 local MAX_SPEED = 20
-
 local function updX(x)
     local rel = math.clamp((x - sliderBg.AbsolutePosition.X) / sliderBg.AbsoluteSize.X, 0, 1)
     sliderFill.Size = UDim2.new(rel, 0, 1, 0)
@@ -296,39 +299,24 @@ end
 
 knob.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1
-        or i.UserInputType == Enum.UserInputType.Touch then
-        dragging = true
-    end
+        or i.UserInputType == Enum.UserInputType.Touch then dragging = true end
 end)
-
 sliderBg.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1
-        or i.UserInputType == Enum.UserInputType.Touch then
-        updX(i.Position.X)
-    end
+        or i.UserInputType == Enum.UserInputType.Touch then updX(i.Position.X) end
 end)
-
 UserInputService.InputChanged:Connect(function(i)
     if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement
-        or i.UserInputType == Enum.UserInputType.Touch) then
-        updX(i.Position.X)
-    end
+        or i.UserInputType == Enum.UserInputType.Touch) then updX(i.Position.X) end
 end)
-
 UserInputService.InputEnded:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1
-        or i.UserInputType == Enum.UserInputType.Touch then
-        dragging = false
-    end
+        or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
 end)
 
--- ==== Хоткей ====
 UserInputService.InputBegan:Connect(function(i, gp)
     if gp then return end
-    if i.KeyCode == TOGGLE then
-        enabled = not enabled
-        upd()
-    end
+    if i.KeyCode == TOGGLE then enabled = not enabled; upd() end
 end)
 
-print("[SpinArm] === ✅ Готово. R — вкл/выкл ===")
+print("[SpinArm] === ✅ Готово ===")
